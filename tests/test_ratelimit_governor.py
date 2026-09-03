@@ -330,5 +330,22 @@ class TestRateLimitBackoffGovernor(unittest.TestCase):
         self.assertTrue(decision.allowed)
 
 
+class TestRateLimitGovernorCLI(unittest.TestCase):
+    def test_cli_audit_json(self):
+        from ratelimit_governor.cli import main
+        self.assertEqual(main(["audit", "--json", "--primary", "20.0"]), 0)
+
+    def test_cli_sample_csv_batch(self):
+        import tempfile
+        from ratelimit_governor.cli import main
+        sample_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample.csv")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, "out_batch.csv")
+            ret = main(["batch", "-i", sample_path, "-o", out_file])
+            self.assertEqual(ret, 0)
+            self.assertTrue(os.path.exists(out_file))
+
+
 if __name__ == "__main__":
     unittest.main()
+

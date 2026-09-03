@@ -1,115 +1,121 @@
 # Agent Rate Limit Backoff Governor
 
-> **Domain:** Autonomous Agent Systems & Context State Architecture  
-> **Reference Guidelines & Standards:** `Distributed Systems RFC & State Machine Verification`
+A pure Python production-grade rate limiting and adaptive resilience engine implementing:
+- Token-Bucket rate limiting with sub-second token replenishment and burst handling.
+- Sliding Window counter rate limiting for smooth temporal request spreading.
+- Exponential backoff with multiple jitter strategies (Full Jitter, Equal Jitter, Decorrelated Jitter).
+- Three-state Circuit Breaker pattern (`CLOSED`, `OPEN`, `HALF_OPEN`) with automated recovery timeouts.
+- Retry budget management enforcing maximum failure ratios over rolling time windows.
+- Standard rate-limit header parsing (RFC 6585, Draft IETF, and vendor variants like `X-RateLimit-*`, `Retry-After`).
+- AIMD (Additive Increase / Multiplicative Decrease) adaptive rate limiting responding dynamically to `429 Too Many Requests` and server error codes.
 
-<div align="center">
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB.svg?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688.svg?logo=fastapi&logoColor=white)
-![Audit Trail](https://img.shields.io/badge/Audit-HMAC--SHA256_Tamper--Evident-brightgreen.svg)
-![Zero-PHI Guard](https://img.shields.io/badge/Guard-Zero--PHI_Outbound-blue.svg)
-![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)
-
-</div>
+Requires Python standard library only (zero external runtime dependencies).
 
 ---
 
-## 📖 What It Does
+## Features
 
-**Agent Rate Limit Backoff Governor** is an advanced analytical and computational platform implementing Token-bucket algorithm & decorrelated jitter backoff rate limit governor.
-
----
-
-## ⚙️ Key Capabilities & Algorithmic Modules
-
-### 🔬 Core Algorithmic & Evaluation Engines
-
-- **`JitterStrategy`** — dedicated module for jitter strategy evaluation and state verification.
-- **`CircuitState`** — dedicated module for circuit state evaluation and state verification.
-- **`BackoffStrategy`** — dedicated module for backoff strategy evaluation and state verification.
-- **`RateLimitHeaders`** — dedicated module for rate limit headers evaluation and state verification.
-- **`BackoffState`** — dedicated module for backoff state evaluation and state verification.
-- **`CircuitBreakerState`** — dedicated module for circuit breaker state evaluation and state verification.
+- **Token Bucket Algorithm:** Enforces steady-state rate limits while permitting controlled burst capacity without starving callers.
+- **Decorrelated Jitter Backoff:** Eliminates synchronized thundering herd spikes on downstream API endpoints by dynamically computing:
+  $$\text{Sleep} = \min(\text{max\_delay}, \text{Uniform}(\text{base\_delay}, \text{previous\_delay} \times 3))$$
+- **Circuit Breaker:** Halts outbound requests upon consecutive failure thresholds to protect impaired upstream services and permits probe requests during half-open states.
+- **Header Parsing:** Automatically extracts rate limit quotas and calculates countdown resets from HTTP headers.
+- **Batch CSV Processing:** High-throughput validation and telemetry auditing for API request workloads.
 
 ---
 
-## 📐 Mathematical Formulation & Logic
+## Installation & Requirements
 
-```text
-  """Calculate the backoff delay for the given attempt number."""
-  current_state.delay = self.backoff.calculate_delay(current_state.attempt)
-```
+- Python 3.10+ (tested on 3.10, 3.11, 3.12)
+- Zero external runtime dependencies. `pytest` is optional for running tests.
 
----
-
-## 💻 CLI Quickstart & Usage
-
-### 1. Guided Interactive Mode
 ```bash
-python cli.py
+git clone https://github.com/abusuraihsakhri/agent-rate-limit-backoff-governor.git
+cd agent-rate-limit-backoff-governor
 ```
 
-### 2. Direct Parameterized Evaluation
+---
+
+## CLI Usage
+
+### 1. Check Rate Limit Decision
+Check whether a request to an endpoint is permitted:
 ```bash
-python cli.py --endpoint <value> --capacity <value> --refill-rate <value> --max-requests <value>
+python cli.py check --endpoint api/v1/query --capacity 10 --refill-rate 2.0
 ```
 
-### Parameter Reference
-- `--endpoint`: Specifies input measurement or parameter value.
-- `--capacity`: Specifies input measurement or parameter value.
-- `--refill-rate`: Specifies input measurement or parameter value.
-- `--max-requests`: Specifies input measurement or parameter value.
-- `--base-delay`: Specifies input measurement or parameter value.
-- `--max-delay`: Specifies input measurement or parameter value.
-- `--threshold`: Specifies input measurement or parameter value.
-- `--timeout`: Specifies input measurement or parameter value.
-- `--jitter`: Specifies input measurement or parameter value.
-- `--attempts`: Specifies input measurement or parameter value.
+### 2. View Governor Status
+Inspect status of Token Bucket, Sliding Window, Circuit Breakers, and Retry Budgets:
+```bash
+python cli.py status
+```
 
-### Input Data Schema
+### 3. Circuit Breaker Simulation
+Simulate failures and state transitions:
+```bash
+python cli.py circuit --threshold 3 --timeout 5.0
+```
 
-| Field | Description | Requirement |
-|:------|:------------|:------------|
-| `task_id` | Parameter / observation metric | Required |
-| `target_identifier` | Parameter / observation metric | Required |
-| `primary_metric` | Parameter / observation metric | Required |
-| `secondary_metric` | Parameter / observation metric | Required |
-| `is_critical_flag` | Parameter / observation metric | Required |
-| `status_descriptor` | Parameter / observation metric | Required |
+### 4. Exponential Jitter Delay Simulation
+Calculate backoff delays across multiple retry attempts:
+```bash
+python cli.py backoff --base-delay 1.0 --max-delay 60.0 --attempts 5 --jitter full
+```
 
----
+### 5. Multi-Agent Telemetry Audit
+Run supervisory audit with JSON output:
+```bash
+python ratelimit_governor_app.py audit --task-id TASK-2026-001 --primary 29.4 --secondary 15.1 --json
+```
 
-## 🛡️ Security & Enterprise Architecture
-
-* **Zero-PHI Outbound Interceptor:** Active AST and regex inspection blocking SSNs, MRNs, phone numbers, and patient identifiers.
-* **Tamper-Evident HMAC-SHA256 Audit Trail:** Chained, cryptographically signed logs for every evaluation and state transition.
-* **Air-Gapped LLM Reasoning Adapter:** Agnostic integration for local Ollama instances (`llama3`, `mistral`), Claude 3.5 Sonnet, GPT-4o, and deterministic test mocks.
-* **Active Learning Bayesian Calibration:** Dynamic tracker updating worker reliability weights and monitoring Brier calibration drift.
-* **FastAPI & Prometheus Telemetry:** Exposes OpenAPI 3.1 REST endpoints and operational Prometheus metrics (`/metrics`).
+### 6. Batch CSV Processing
+Batch process request metrics and save results:
+```bash
+python ratelimit_governor_app.py batch -i sample.csv -o results.csv
+```
 
 ---
 
-## 🧪 Testing & Verification
+## Python API Quickstart
 
-Run the automated test suite:
+```python
+from rate_limit_governor import (
+    RateLimitBackoffGovernor,
+    ExponentialBackoff,
+    JitterStrategy,
+    CircuitBreaker,
+)
+
+# 1. Initialize Governor
+governor = RateLimitBackoffGovernor(
+    capacity=20,
+    refill_rate=5.0,        # 5 tokens per second
+    max_requests=100,       # 100 requests per minute
+    base_delay=0.5,
+    max_delay=30.0,
+)
+
+# 2. Check if request is allowed
+decision = governor.check_request("llm_service")
+if decision.allowed:
+    print(f"Request permitted. Tokens remaining: {decision.remaining}")
+else:
+    print(f"Request throttled. Backoff delay: {decision.delay:.2f}s (Reason: {decision.reason})")
+
+# 3. Decorrelated Jitter Backoff
+backoff = ExponentialBackoff(base_delay=1.0, max_delay=30.0, jitter=JitterStrategy.DECORRELATED)
+for attempt in range(4):
+    delay = backoff.calculate_delay(attempt)
+    print(f"Attempt {attempt + 1}: Sleep {delay:.3f}s")
+```
+
+---
+
+## Running Tests
+
+Run the test suite using standard `unittest` or `pytest`:
 
 ```bash
 pytest -v
 ```
 
-Execute high-throughput batch simulation benchmarks:
-
-```bash
-python simulator.py --tasks 1000 --concurrency 8
-```
-
----
-
-## 🐳 Container Deployment
-
-```bash
-docker build -t agent-rate-limit-backoff-governor .
-docker run -p 8000:8000 agent-rate-limit-backoff-governor
-```
