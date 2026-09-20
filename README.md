@@ -1,5 +1,7 @@
 # Agent Rate Limit Backoff Governor
 
+### [Open the Live Application →](https://abusuraihsakhri.github.io/agent-rate-limit-backoff-governor/)
+
 A small Python library and command-line tool for request throttling, retry backoff, circuit breaking, and retry-budget control. The repository also includes a dependency-free browser simulator for exploring the algorithms interactively.
 
 ## What it includes
