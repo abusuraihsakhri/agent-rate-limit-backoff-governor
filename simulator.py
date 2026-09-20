@@ -1,67 +1,71 @@
-"""
-Distributed Component High-Throughput Traffic & Stress Testing Simulator for Agent Rate Limit Backoff Governor.
-"""
-import time
+#!/usr/bin/env python3
+"""Deterministic load simulator for the rate-limit governor."""
+from __future__ import annotations
+
+import argparse
+import json
 import random
-import sys
-from agents.models import SystemTaskPayload
-from agents.supervisor import SystemSupervisor
-from agents.base import PHIGuard, SecurityException, AuditLogger
+from typing import Sequence
 
-def run_simulation(iterations: int = 100):
-    print(f"Starting Distributed Component Simulation on Agent Rate Limit Backoff Governor ({iterations} tasks)...")
-    supervisor = SystemSupervisor(model_provider="mock")
-    start_time = time.time()
-    nominal_count = 0
-    elevated_count = 0
-    critical_count = 0
-    phi_blocked_count = 0
+from rate_limit_governor import JitterStrategy, RateLimitBackoffGovernor
 
-    for i in range(iterations):
-        # 1. Normal / Elevated / Critical payload distribution
-        p_val = random.uniform(5.0, 40.0)
-        s_val = random.uniform(1.0, 20.0)
-        is_crit = random.random() < 0.15
-        descriptor = random.choice(["NOMINAL", "DISCORDANT_ANOMALY", "MUTANT_VARIANT", "OPTIMAL"])
 
-        payload = SystemTaskPayload(
-            task_id=f"SIM-{i+1:04d}",
-            target_identifier=f"SPECIMEN-{random.randint(100, 999)}",
-            primary_metric=round(p_val, 2),
-            secondary_metric=round(s_val, 2),
-            status_descriptor=descriptor,
-            is_critical_flag=is_crit
-        )
+def run_simulation(requests: int = 100, failure_rate: float = 0.1, seed: int | None = None) -> dict:
+    if requests <= 0:
+        raise ValueError("requests must be positive")
+    if not 0.0 <= failure_rate <= 1.0:
+        raise ValueError("failure_rate must be between 0 and 1")
 
-        dossier = supervisor.process_task(payload)
-        if dossier.overall_urgency.value == "CRITICAL_STAT_PANIC":
-            critical_count += 1
-        elif dossier.overall_urgency.value == "ELEVATED_RISK":
-            elevated_count += 1
+    rng = random.Random(seed)
+    governor = RateLimitBackoffGovernor(
+        capacity=20,
+        refill_rate=1000.0,
+        window_sec=1.0,
+        max_requests=max(20, requests),
+        base_delay=0.0,
+        max_delay=0.0,
+        jitter=JitterStrategy.NONE,
+        circuit_failure_threshold=max(5, requests + 1),
+        max_retries=requests,
+        retry_window_sec=60.0,
+    )
+
+    allowed = throttled = successes = failures = 0
+    reasons: dict[str, int] = {}
+    for _ in range(requests):
+        decision = governor.check_request("simulation")
+        if not decision.allowed:
+            throttled += 1
+            reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
+            continue
+        allowed += 1
+        if rng.random() < failure_rate:
+            failures += 1
+            governor.record_failure("simulation", status_code=500)
         else:
-            nominal_count += 1
+            successes += 1
+            governor.record_success("simulation", status_code=200)
 
-        # 2. Adversarial PHI test injection (every 25 iterations)
-        if (i + 1) % 25 == 0:
-            try:
-                PHIGuard.assert_no_phi(f"Patient John Doe MRN-{random.randint(100000, 999999)} test")
-            except SecurityException:
-                phi_blocked_count += 1
+    return {
+        "requests": requests,
+        "allowed": allowed,
+        "throttled": throttled,
+        "successes": successes,
+        "failures": failures,
+        "throttle_reasons": reasons,
+        "final_status": governor.get_status(),
+    }
 
-    elapsed = time.time() - start_time
-    print("\n" + "=" * 70)
-    print(f"  SIMULATION SUMMARY FOR AGENT RATE LIMIT BACKOFF GOVERNOR")
-    print("=" * 70)
-    print(f"  Total Tasks Processed:     {iterations}")
-    print(f"  Elapsed Time:              {elapsed:.3f} seconds ({iterations/max(0.001, elapsed):.1f} tasks/sec)")
-    print(f"  Routine Outcomes:          {nominal_count} ({nominal_count/iterations*100:.1f}%)")
-    print(f"  Elevated Risk Outcomes:    {elevated_count} ({elevated_count/iterations*100:.1f}%)")
-    print(f"  Critical Interventions:    {critical_count} ({critical_count/iterations*100:.1f}%)")
-    print(f"  Adversarial PHI Intercepts:{phi_blocked_count} (100% Interception Rate)")
-    print(f"  HMAC Audit Ledger Blocks:  {len(AuditLogger.get_trail())}")
-    print(f"  HMAC Cryptographic Check:  {AuditLogger.verify_integrity()}")
-    print("=" * 70)
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run a deterministic rate-limit simulation")
+    parser.add_argument("--requests", type=int, default=100)
+    parser.add_argument("--failure-rate", type=float, default=0.1)
+    parser.add_argument("--seed", type=int)
+    args = parser.parse_args(argv)
+    print(json.dumps(run_simulation(args.requests, args.failure_rate, args.seed), indent=2))
+    return 0
+
 
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 100
-    run_simulation(n)
+    raise SystemExit(main())
