@@ -508,16 +508,6 @@ class RateLimitBackoffGovernor:
                     retry_budget_remaining=self.retry_budget.remaining,
                 )
 
-        if not self.adaptive.is_allowed():
-            return GovernorDecision(
-                allowed=False,
-                reason="Adaptive limit reached",
-                delay=self.sliding_window.time_until_available(),
-                remaining=0,
-                circuit_state=self.circuit_breaker.state.value,
-                retry_budget_remaining=self.retry_budget.remaining,
-            )
-
         if not self.token_bucket.consume():
             return GovernorDecision(
                 allowed=False,
@@ -535,6 +525,18 @@ class RateLimitBackoffGovernor:
                 reason="Sliding window limit reached",
                 delay=self.sliding_window.time_until_available(),
                 remaining=0,
+                circuit_state=self.circuit_breaker.state.value,
+                retry_budget_remaining=self.retry_budget.remaining,
+            )
+
+        if not self.adaptive.is_allowed():
+            self.token_bucket.tokens = min(self.token_bucket.capacity, self.token_bucket.tokens + 1.0)
+            self.sliding_window.undo_last()
+            return GovernorDecision(
+                allowed=False,
+                reason="Adaptive limit reached",
+                delay=self.sliding_window.time_until_available(),
+                remaining=self.sliding_window.remaining,
                 circuit_state=self.circuit_breaker.state.value,
                 retry_budget_remaining=self.retry_budget.remaining,
             )
