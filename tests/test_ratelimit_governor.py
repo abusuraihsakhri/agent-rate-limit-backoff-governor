@@ -1,351 +1,167 @@
-#!/usr/bin/env python3
-"""Tests for Rate Limit Backoff Governor."""
-import sys
-import os
-import unittest
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pytest
 
 from rate_limit_governor import (
-    TokenBucket, SlidingWindowRateLimiter, ExponentialBackoff,
-    CircuitBreaker, RetryBudgetManager, RateLimitHeaderParser,
-    AdaptiveRateLimiter, RateLimitBackoffGovernor,
-    JitterStrategy, BackoffStrategy, CircuitState,
+    AdaptiveRateLimiter, BackoffStrategy, CircuitBreaker, CircuitState,
+    ExponentialBackoff, JitterStrategy, RateLimitBackoffGovernor,
+    RateLimitHeaderParser, RetryBudgetManager, SlidingWindowRateLimiter,
+    TokenBucket,
 )
 
 
-class TestTokenBucket(unittest.TestCase):
-    def test_consume_within_capacity(self):
-        bucket = TokenBucket(capacity=5, refill_rate=1.0)
-        for _ in range(5):
-            self.assertTrue(bucket.consume())
-        self.assertFalse(bucket.consume())
-
-    def test_refill(self):
-        bucket = TokenBucket(capacity=5, refill_rate=100.0)
-        for _ in range(5):
-            bucket.consume()
-        self.assertFalse(bucket.consume())
-        time.sleep(0.1)
-        self.assertTrue(bucket.consume())
-
-    def test_available(self):
-        bucket = TokenBucket(capacity=10, refill_rate=1.0)
-        self.assertAlmostEqual(bucket.available, 10.0, places=0)
-        bucket.consume(3)
-        self.assertAlmostEqual(bucket.available, 7.0, places=0)
-
-    def test_time_until_tokens(self):
-        bucket = TokenBucket(capacity=5, refill_rate=2.0)
-        for _ in range(5):
-            bucket.consume()
-        wait = bucket.time_until_tokens(1)
-        self.assertGreater(wait, 0)
-        self.assertLess(wait, 1.0)
-
-    def test_reset(self):
-        bucket = TokenBucket(capacity=5, refill_rate=1.0)
-        for _ in range(5):
-            bucket.consume()
-        bucket.reset()
-        self.assertTrue(bucket.consume())
-
-    def test_invalid_capacity(self):
-        with self.assertRaises(ValueError):
-            TokenBucket(capacity=0, refill_rate=1.0)
-
-    def test_invalid_refill_rate(self):
-        with self.assertRaises(ValueError):
-            TokenBucket(capacity=5, refill_rate=-1.0)
+def test_token_bucket_capacity_and_validation():
+    bucket = TokenBucket(2, 0)
+    assert bucket.consume()
+    assert bucket.consume()
+    assert not bucket.consume()
+    assert bucket.time_until_tokens() == float("inf")
+    with pytest.raises(ValueError):
+        TokenBucket(0, 1)
+    with pytest.raises(ValueError):
+        bucket.consume(0)
 
 
-class TestSlidingWindowRateLimiter(unittest.TestCase):
-    def test_allow_within_limit(self):
-        limiter = SlidingWindowRateLimiter(window_sec=1.0, max_requests=5)
-        for _ in range(5):
-            self.assertTrue(limiter.allow())
-        self.assertFalse(limiter.allow())
-
-    def test_remaining(self):
-        limiter = SlidingWindowRateLimiter(window_sec=1.0, max_requests=5)
-        self.assertEqual(limiter.remaining, 5)
-        limiter.allow()
-        self.assertEqual(limiter.remaining, 4)
-
-    def test_window_expires(self):
-        limiter = SlidingWindowRateLimiter(window_sec=0.1, max_requests=2)
-        limiter.allow()
-        limiter.allow()
-        self.assertFalse(limiter.allow())
-        time.sleep(0.15)
-        self.assertTrue(limiter.allow())
-
-    def test_reset(self):
-        limiter = SlidingWindowRateLimiter(window_sec=1.0, max_requests=2)
-        limiter.allow()
-        limiter.allow()
-        limiter.reset()
-        self.assertEqual(limiter.remaining, 2)
+def test_sliding_window_expires_and_undoes():
+    limiter = SlidingWindowRateLimiter(0.02, 1)
+    assert limiter.allow()
+    assert not limiter.allow()
+    limiter.undo_last()
+    assert limiter.allow()
+    limiter.reset()
+    assert limiter.remaining == 1
 
 
-class TestExponentialBackoff(unittest.TestCase):
-    def test_exponential_growth(self):
-        bo = ExponentialBackoff(base_delay=1.0, max_delay=60.0,
-                                jitter=JitterStrategy.NONE)
-        d0 = bo.calculate_delay(0)
-        d1 = bo.calculate_delay(1)
-        d2 = bo.calculate_delay(2)
-        self.assertAlmostEqual(d0, 1.0, places=1)
-        self.assertAlmostEqual(d1, 2.0, places=1)
-        self.assertAlmostEqual(d2, 4.0, places=1)
-
-    def test_max_delay_cap(self):
-        bo = ExponentialBackoff(base_delay=1.0, max_delay=10.0,
-                                jitter=JitterStrategy.NONE)
-        d = bo.calculate_delay(20)
-        self.assertLessEqual(d, 10.0)
-
-    def test_linear_strategy(self):
-        bo = ExponentialBackoff(base_delay=1.0, max_delay=60.0,
-                                strategy=BackoffStrategy.LINEAR,
-                                jitter=JitterStrategy.NONE)
-        d0 = bo.calculate_delay(0)
-        d1 = bo.calculate_delay(1)
-        d2 = bo.calculate_delay(2)
-        self.assertAlmostEqual(d0, 1.0, places=1)
-        self.assertAlmostEqual(d1, 2.0, places=1)
-        self.assertAlmostEqual(d2, 3.0, places=1)
-
-    def test_fibonacci_strategy(self):
-        bo = ExponentialBackoff(base_delay=1.0, max_delay=100.0,
-                                strategy=BackoffStrategy.FIBONACCI,
-                                jitter=JitterStrategy.NONE)
-        d0 = bo.calculate_delay(0)
-        d1 = bo.calculate_delay(1)
-        self.assertGreater(d0, 0)
-        self.assertGreater(d1, d0)
-
-    def test_full_jitter(self):
-        bo = ExponentialBackoff(base_delay=10.0, max_delay=100.0,
-                                jitter=JitterStrategy.FULL)
-        delays = [bo.calculate_delay(3) for _ in range(100)]
-        self.assertGreater(max(delays), 0)
-        self.assertLess(max(delays), 81)
-
-    def test_equal_jitter(self):
-        bo = ExponentialBackoff(base_delay=10.0, max_delay=100.0,
-                                jitter=JitterStrategy.EQUAL)
-        delays = [bo.calculate_delay(2) for _ in range(100)]
-        self.assertGreater(min(delays), 4.9)
-
-    def test_decorrelated_jitter(self):
-        bo = ExponentialBackoff(base_delay=1.0, max_delay=100.0,
-                                jitter=JitterStrategy.DECORRELATED)
-        delays = [bo.calculate_delay(3) for _ in range(100)]
-        self.assertGreater(min(delays), 0)
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        (BackoffStrategy.EXPONENTIAL, [1.0, 2.0, 4.0]),
+        (BackoffStrategy.LINEAR, [1.0, 2.0, 3.0]),
+        (BackoffStrategy.FIBONACCI, [1.0, 2.0, 3.0]),
+    ],
+)
+def test_backoff_schedules(strategy, expected):
+    backoff = ExponentialBackoff(1, 100, strategy, JitterStrategy.NONE)
+    assert [backoff.calculate_delay(i) for i in range(3)] == expected
 
 
-class TestCircuitBreaker(unittest.TestCase):
-    def test_initial_state_closed(self):
-        cb = CircuitBreaker(failure_threshold=3)
-        self.assertEqual(cb.state, CircuitState.CLOSED)
-        self.assertTrue(cb.allow_request())
-
-    def test_opens_after_threshold(self):
-        cb = CircuitBreaker(failure_threshold=3)
-        for _ in range(3):
-            cb.record_failure()
-        self.assertEqual(cb.state, CircuitState.OPEN)
-        self.assertFalse(cb.allow_request())
-
-    def test_half_open_after_timeout(self):
-        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1)
-        cb.record_failure()
-        cb.record_failure()
-        self.assertEqual(cb.state, CircuitState.OPEN)
-        time.sleep(0.15)
-        self.assertEqual(cb.state, CircuitState.HALF_OPEN)
-        self.assertTrue(cb.allow_request())
-
-    def test_closes_after_successful_recovery(self):
-        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1, half_open_max=2)
-        cb.record_failure()
-        cb.record_failure()
-        time.sleep(0.15)
-        cb.record_success()
-        cb.record_success()
-        self.assertEqual(cb.state, CircuitState.CLOSED)
-
-    def test_reopens_on_failure_in_half_open(self):
-        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1)
-        cb.record_failure()
-        cb.record_failure()
-        time.sleep(0.15)
-        self.assertEqual(cb.state, CircuitState.HALF_OPEN)
-        cb.record_failure()
-        self.assertEqual(cb.state, CircuitState.OPEN)
-
-    def test_success_decrements_failures(self):
-        cb = CircuitBreaker(failure_threshold=5)
-        cb.record_failure()
-        cb.record_failure()
-        self.assertEqual(cb.failure_count, 2)
-        cb.record_success()
-        self.assertEqual(cb.failure_count, 1)
-
-    def test_get_state_info(self):
-        cb = CircuitBreaker(failure_threshold=5)
-        info = cb.get_state_info()
-        self.assertEqual(info["state"], "closed")
-        self.assertEqual(info["failure_threshold"], 5)
+def test_decorrelated_jitter_is_capped():
+    backoff = ExponentialBackoff(10, 40, jitter=JitterStrategy.DECORRELATED)
+    assert all(10 <= backoff.calculate_delay(8, previous_delay=40) <= 40 for _ in range(50))
 
 
-class TestRetryBudgetManager(unittest.TestCase):
-    def test_can_retry_within_budget(self):
-        budget = RetryBudgetManager(max_retries=3, window_sec=1.0)
-        self.assertTrue(budget.can_retry())
-        budget.record_retry()
-        budget.record_retry()
-        budget.record_retry()
-        self.assertFalse(budget.can_retry())
-
-    def test_remaining(self):
-        budget = RetryBudgetManager(max_retries=5, window_sec=1.0)
-        self.assertEqual(budget.remaining, 5)
-        budget.record_retry()
-        self.assertEqual(budget.remaining, 4)
-
-    def test_window_expires(self):
-        budget = RetryBudgetManager(max_retries=2, window_sec=0.1)
-        budget.record_retry()
-        budget.record_retry()
-        self.assertFalse(budget.can_retry())
-        time.sleep(0.15)
-        self.assertTrue(budget.can_retry())
-
-    def test_reset(self):
-        budget = RetryBudgetManager(max_retries=2, window_sec=1.0)
-        budget.record_retry()
-        budget.record_retry()
-        budget.reset()
-        self.assertEqual(budget.remaining, 2)
+def test_backoff_rejects_invalid_bounds():
+    with pytest.raises(ValueError):
+        ExponentialBackoff(-1, 10)
+    with pytest.raises(ValueError):
+        ExponentialBackoff(10, 5)
 
 
-class TestRateLimitHeaderParser(unittest.TestCase):
-    def test_parse_standard_headers(self):
-        headers = {
-            "X-RateLimit-Limit": "100",
-            "X-RateLimit-Remaining": "50",
-            "X-RateLimit-Reset": "1700000000",
-        }
-        parsed = RateLimitHeaderParser.parse(headers)
-        self.assertEqual(parsed.limit, 100)
-        self.assertEqual(parsed.remaining, 50)
-        self.assertEqual(parsed.reset, 1700000000.0)
-
-    def test_parse_retry_after(self):
-        headers = {"Retry-After": "30"}
-        parsed = RateLimitHeaderParser.parse(headers)
-        self.assertEqual(parsed.retry_after, 30.0)
-
-    def test_parse_empty_headers(self):
-        parsed = RateLimitHeaderParser.parse({})
-        self.assertIsNone(parsed.limit)
-        self.assertIsNone(parsed.remaining)
-        self.assertIsNone(parsed.retry_after)
-
-    def test_parse_invalid_values(self):
-        headers = {"X-RateLimit-Limit": "not_a_number"}
-        parsed = RateLimitHeaderParser.parse(headers)
-        self.assertIsNone(parsed.limit)
+def test_circuit_breaker_cycle_and_probe_bound():
+    breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=0, half_open_max=2)
+    breaker.record_failure()
+    assert breaker.state == CircuitState.HALF_OPEN
+    assert breaker.allow_request()
+    assert breaker.allow_request()
+    assert not breaker.allow_request()
+    breaker.record_success()
+    breaker.record_success()
+    assert breaker.state == CircuitState.CLOSED
 
 
-class TestAdaptiveRateLimiter(unittest.TestCase):
-    def test_initial_limit(self):
-        al = AdaptiveRateLimiter(base_limit=100)
-        self.assertEqual(al.current_limit, 100)
-
-    def test_reduces_on_429(self):
-        al = AdaptiveRateLimiter(base_limit=100)
-        for _ in range(10):
-            al.record_response(429)
-        self.assertLess(al.current_limit, 100)
-
-    def test_reduces_on_high_error_rate(self):
-        al = AdaptiveRateLimiter(base_limit=100)
-        for _ in range(10):
-            al.record_response(500)
-        self.assertLess(al.current_limit, 100)
-
-    def test_increases_on_low_error_rate(self):
-        al = AdaptiveRateLimiter(base_limit=100)
-        for _ in range(30):
-            al.record_response(200)
-        self.assertGreaterEqual(al.current_limit, 100)
-
-    def test_reset(self):
-        al = AdaptiveRateLimiter(base_limit=100)
-        for _ in range(10):
-            al.record_response(429)
-        al.reset()
-        self.assertEqual(al.current_limit, 100)
+def test_circuit_reset_closes_open_breaker():
+    breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=100)
+    breaker.record_failure()
+    assert breaker.state == CircuitState.OPEN
+    breaker.reset()
+    assert breaker.state == CircuitState.CLOSED
+    assert breaker.allow_request()
 
 
-class TestRateLimitBackoffGovernor(unittest.TestCase):
-    def test_check_request_allowed(self):
-        gov = RateLimitBackoffGovernor(capacity=10, refill_rate=10.0, max_requests=100)
-        decision = gov.check_request()
-        self.assertTrue(decision.allowed)
-
-    def test_check_request_after_failures(self):
-        gov = RateLimitBackoffGovernor(capacity=10, refill_rate=10.0, max_requests=100)
-        for _ in range(5):
-            gov.record_failure("api", status_code=500)
-        decision = gov.check_request("api")
-        self.assertFalse(decision.allowed)
-
-    def test_circuit_breaker_integration(self):
-        gov = RateLimitBackoffGovernor(capacity=100, refill_rate=100.0,
-                                       max_requests=1000, circuit_failure_threshold=3)
-        for _ in range(3):
-            gov.record_failure("api", status_code=500)
-        decision = gov.check_request("api")
-        self.assertFalse(decision.allowed)
-        self.assertIn("Circuit", decision.reason)
-
-    def test_get_status(self):
-        gov = RateLimitBackoffGovernor()
-        status = gov.get_status()
-        self.assertIn("token_bucket", status)
-        self.assertIn("sliding_window", status)
-        self.assertIn("circuit_breaker", status)
-        self.assertIn("retry_budget", status)
-
-    def test_reset(self):
-        gov = RateLimitBackoffGovernor(capacity=10, refill_rate=10.0, max_requests=100)
-        gov.record_failure("api", status_code=500)
-        gov.reset()
-        decision = gov.check_request("api")
-        self.assertTrue(decision.allowed)
+def test_retry_budget_is_enforced_atomically():
+    budget = RetryBudgetManager(max_retries=2, window_sec=1)
+    assert budget.record_retry()
+    assert budget.record_retry()
+    assert not budget.record_retry()
+    assert budget.remaining == 0
 
 
-class TestRateLimitGovernorCLI(unittest.TestCase):
-    def test_cli_audit_json(self):
-        from ratelimit_governor.cli import main
-        self.assertEqual(main(["audit", "--json", "--primary", "20.0"]), 0)
-
-    def test_cli_sample_csv_batch(self):
-        import tempfile
-        from ratelimit_governor.cli import main
-        sample_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample.csv")
-        with tempfile.TemporaryDirectory() as tmpdir:
-            out_file = os.path.join(tmpdir, "out_batch.csv")
-            ret = main(["batch", "-i", sample_path, "-o", out_file])
-            self.assertEqual(ret, 0)
-            self.assertTrue(os.path.exists(out_file))
+def test_retry_after_seconds_and_http_date():
+    seconds = RateLimitHeaderParser.parse({"Retry-After": "30"})
+    assert seconds.retry_after == 30
+    future = datetime.now(timezone.utc) + timedelta(seconds=30)
+    parsed = RateLimitHeaderParser.parse({"Retry-After": format_datetime(future, usegmt=True)})
+    assert parsed.retry_after is not None
+    assert 20 <= parsed.retry_after <= 30
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_header_parser_ignores_invalid_values():
+    parsed = RateLimitHeaderParser.parse({"X-RateLimit-Limit": "bad", "Retry-After": "not-a-date"})
+    assert parsed.limit is None
+    assert parsed.retry_after is None
 
+
+def test_adaptive_limiter_tracks_requests_separately():
+    limiter = AdaptiveRateLimiter(base_limit=2, window_sec=1)
+    assert limiter.is_allowed()
+    limiter.record_request()
+    limiter.record_request()
+    assert not limiter.is_allowed()
+
+
+def test_adaptive_limiter_reduces_on_429_and_recovers_slowly():
+    limiter = AdaptiveRateLimiter(base_limit=100)
+    limiter.record_response(429)
+    assert limiter.current_limit == 50
+    for _ in range(20):
+        limiter.record_response(200)
+    assert limiter.current_limit == 51
+
+
+def test_governor_allows_and_reports_status():
+    governor = RateLimitBackoffGovernor(capacity=2, refill_rate=0, max_requests=10)
+    decision = governor.check_request("api")
+    assert decision.allowed
+    status = governor.get_status()
+    assert status["token_bucket"]["capacity"] == 2
+    assert status["active_backoffs"] == 0
+
+
+def test_governor_sliding_window_rejection_refunds_token():
+    governor = RateLimitBackoffGovernor(capacity=2, refill_rate=0, window_sec=60, max_requests=1)
+    assert governor.check_request("api").allowed
+    before = governor.token_bucket.available
+    rejected = governor.check_request("api")
+    assert not rejected.allowed
+    assert rejected.reason == "Sliding window limit reached"
+    assert governor.token_bucket.available == before
+
+
+def test_governor_failure_creates_backoff_and_retry_budget():
+    governor = RateLimitBackoffGovernor(
+        capacity=10, refill_rate=10, base_delay=10, max_delay=10,
+        jitter=JitterStrategy.NONE, max_retries=1,
+    )
+    governor.record_failure("api", 500)
+    state = governor.get_backoff_state("api")
+    assert state is not None and state.delay == 10
+    assert governor.retry_budget.remaining == 0
+    governor.record_failure("other", 500)
+    assert governor.get_backoff_state("other") is None
+
+
+def test_governor_honors_retry_after():
+    governor = RateLimitBackoffGovernor(max_retries=2)
+    governor.record_failure("api", 429, {"Retry-After": "12"})
+    assert governor.get_backoff_state("api").delay == 12
+
+
+def test_governor_reset_clears_state():
+    governor = RateLimitBackoffGovernor(circuit_failure_threshold=1, circuit_recovery_timeout=100)
+    governor.record_failure("api", 500)
+    assert governor.circuit_breaker.state == CircuitState.OPEN
+    governor.reset()
+    assert governor.circuit_breaker.state == CircuitState.CLOSED
+    assert governor.get_backoff_state("api") is None

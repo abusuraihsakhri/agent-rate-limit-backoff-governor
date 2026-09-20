@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Rate Limit Backoff Governor</title>
+  <meta name="description" content="Interactive rate-limit and retry-backoff simulator.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Browser simulator</p>
+        <h1>Rate Limit Backoff Governor</h1>
+        <p class="lede">Explore token-bucket throttling, sliding windows and retry schedules without sending data anywhere.</p>
+      </div>
+      <button id="theme" class="icon-btn" type="button" aria-label="Toggle color theme">◐</button>
+    </header>
+
+    <section class="grid" aria-label="Simulator">
+      <form id="sim-form" class="panel controls">
+        <div class="section-head"><h2>Configuration</h2><button id="reset" type="button" class="link-btn">Reset</button></div>
+        <div class="fields">
+          <label>Capacity<input id="capacity" type="number" min="1" value="10"></label>
+          <label>Refill / sec<input id="refill" type="number" min="0" step="0.1" value="2"></label>
+          <label>Window limit<input id="windowLimit" type="number" min="1" value="8"></label>
+          <label>Window seconds<input id="windowSeconds" type="number" min="0.1" step="0.1" value="2"></label>
+          <label>Requests<input id="requestCount" type="number" min="1" max="1000" value="24"></label>
+          <label>Interval ms<input id="intervalMs" type="number" min="0" value="120"></label>
+          <label>Base delay<input id="baseDelay" type="number" min="0" step="0.1" value="1"></label>
+          <label>Max delay<input id="maxDelay" type="number" min="0" step="0.1" value="30"></label>
+          <label>Strategy<select id="strategy"><option>exponential</option><option>linear</option><option>fibonacci</option></select></label>
+          <label>Jitter<select id="jitter"><option>none</option><option>full</option><option>equal</option><option>decorrelated</option></select></label>
+        </div>
+        <p id="error" class="error" role="alert"></p>
+        <button class="primary" type="submit">Run simulation</button>
+      </form>
+
+      <section class="panel results" aria-live="polite">
+        <div class="section-head"><h2>Results</h2><span id="status" class="pill">Ready</span></div>
+        <div class="stats">
+          <article><span>Allowed</span><strong id="allowed">0</strong></article>
+          <article><span>Throttled</span><strong id="throttled">0</strong></article>
+          <article><span>Tokens left</span><strong id="tokens">0</strong></article>
+          <article><span>Peak backoff</span><strong id="peak">0s</strong></article>
+        </div>
+        <h3>Backoff schedule</h3>
+        <div id="bars" class="bars"></div>
+        <h3>Sample request timeline</h3>
+        <div id="timeline" class="timeline"></div>
+      </section>
+    </section>
+
+    <footer>Runs locally in your browser · No network requests · No data upload</footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
