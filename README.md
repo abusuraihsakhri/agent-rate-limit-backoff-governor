@@ -1,121 +1,95 @@
 # Agent Rate Limit Backoff Governor
 
-A pure Python production-grade rate limiting and adaptive resilience engine implementing:
-- Token-Bucket rate limiting with sub-second token replenishment and burst handling.
-- Sliding Window counter rate limiting for smooth temporal request spreading.
-- Exponential backoff with multiple jitter strategies (Full Jitter, Equal Jitter, Decorrelated Jitter).
-- Three-state Circuit Breaker pattern (`CLOSED`, `OPEN`, `HALF_OPEN`) with automated recovery timeouts.
-- Retry budget management enforcing maximum failure ratios over rolling time windows.
-- Standard rate-limit header parsing (RFC 6585, Draft IETF, and vendor variants like `X-RateLimit-*`, `Retry-After`).
-- AIMD (Additive Increase / Multiplicative Decrease) adaptive rate limiting responding dynamically to `429 Too Many Requests` and server error codes.
+A small Python library and command-line tool for request throttling, retry backoff, circuit breaking, and retry-budget control. The repository also includes a dependency-free browser simulator for exploring the algorithms interactively.
 
-Requires Python standard library only (zero external runtime dependencies).
+## What it includes
 
----
+- Token-bucket rate limiting with fractional refill rates and burst capacity.
+- Sliding-window request limits.
+- Exponential, linear, and Fibonacci retry schedules.
+- No jitter, full jitter, equal jitter, and capped decorrelated jitter.
+- Circuit breaker states with bounded half-open probes and timed recovery.
+- Retry budgets over rolling time windows.
+- Parsing of common `RateLimit-*`, `X-RateLimit-*`, and `Retry-After` headers, including HTTP-date values.
+- Adaptive request ceilings that respond to `429` and server-error responses.
+- A local browser simulator with light/dark themes and no external JavaScript dependencies.
 
-## Features
+## Browser simulator
 
-- **Token Bucket Algorithm:** Enforces steady-state rate limits while permitting controlled burst capacity without starving callers.
-- **Decorrelated Jitter Backoff:** Eliminates synchronized thundering herd spikes on downstream API endpoints by dynamically computing:
-  $$\text{Sleep} = \min(\text{max\_delay}, \text{Uniform}(\text{base\_delay}, \text{previous\_delay} \times 3))$$
-- **Circuit Breaker:** Halts outbound requests upon consecutive failure thresholds to protect impaired upstream services and permits probe requests during half-open states.
-- **Header Parsing:** Automatically extracts rate limit quotas and calculates countdown resets from HTTP headers.
-- **Batch CSV Processing:** High-throughput validation and telemetry auditing for API request workloads.
+Open `index.html` directly or serve the repository with a static HTTP server:
 
----
+```bash
+python -m http.server 8000
+```
 
-## Installation & Requirements
+Then open `http://localhost:8000/`.
 
-- Python 3.10+ (tested on 3.10, 3.11, 3.12)
-- Zero external runtime dependencies. `pytest` is optional for running tests.
+The browser interface runs entirely on the device. It does not upload configuration or simulation data and makes no external API requests.
+
+## Installation
+
+Python 3.10 or newer is required. The runtime library uses only the Python standard library.
 
 ```bash
 git clone https://github.com/abusuraihsakhri/agent-rate-limit-backoff-governor.git
 cd agent-rate-limit-backoff-governor
+python -m pip install -e .
 ```
 
----
+## Command line
 
-## CLI Usage
-
-### 1. Check Rate Limit Decision
-Check whether a request to an endpoint is permitted:
 ```bash
-python cli.py check --endpoint api/v1/query --capacity 10 --refill-rate 2.0
+rate-limit-governor status
+rate-limit-governor check --endpoint api/v1/query --capacity 10 --refill-rate 2
+rate-limit-governor backoff --strategy exponential --jitter decorrelated --attempts 6
+rate-limit-governor headers --headers '{"Retry-After":"30","X-RateLimit-Remaining":"4"}'
+python simulator.py --requests 100 --failure-rate 0.1 --seed 7
 ```
 
-### 2. View Governor Status
-Inspect status of Token Bucket, Sliding Window, Circuit Breakers, and Retry Budgets:
-```bash
-python cli.py status
-```
+The legacy entry points `python cli.py ...` and `python ratelimit_governor_app.py ...` remain available as compatibility wrappers.
 
-### 3. Circuit Breaker Simulation
-Simulate failures and state transitions:
-```bash
-python cli.py circuit --threshold 3 --timeout 5.0
-```
-
-### 4. Exponential Jitter Delay Simulation
-Calculate backoff delays across multiple retry attempts:
-```bash
-python cli.py backoff --base-delay 1.0 --max-delay 60.0 --attempts 5 --jitter full
-```
-
-### 5. Multi-Agent Telemetry Audit
-Run supervisory audit with JSON output:
-```bash
-python ratelimit_governor_app.py audit --task-id TASK-2026-001 --primary 29.4 --secondary 15.1 --json
-```
-
-### 6. Batch CSV Processing
-Batch process request metrics and save results:
-```bash
-python ratelimit_governor_app.py batch -i sample.csv -o results.csv
-```
-
----
-
-## Python API Quickstart
+## Python API
 
 ```python
-from rate_limit_governor import (
-    RateLimitBackoffGovernor,
-    ExponentialBackoff,
-    JitterStrategy,
-    CircuitBreaker,
-)
+from rate_limit_governor import RateLimitBackoffGovernor
 
-# 1. Initialize Governor
 governor = RateLimitBackoffGovernor(
     capacity=20,
-    refill_rate=5.0,        # 5 tokens per second
-    max_requests=100,       # 100 requests per minute
+    refill_rate=5.0,
+    max_requests=100,
     base_delay=0.5,
     max_delay=30.0,
 )
 
-# 2. Check if request is allowed
-decision = governor.check_request("llm_service")
+decision = governor.check_request("upstream-api")
 if decision.allowed:
-    print(f"Request permitted. Tokens remaining: {decision.remaining}")
+    # Perform the request, then record its response.
+    governor.record_success("upstream-api", status_code=200)
 else:
-    print(f"Request throttled. Backoff delay: {decision.delay:.2f}s (Reason: {decision.reason})")
-
-# 3. Decorrelated Jitter Backoff
-backoff = ExponentialBackoff(base_delay=1.0, max_delay=30.0, jitter=JitterStrategy.DECORRELATED)
-for attempt in range(4):
-    delay = backoff.calculate_delay(attempt)
-    print(f"Attempt {attempt + 1}: Sleep {delay:.3f}s")
+    print(decision.reason, decision.delay)
 ```
 
----
+`check_request()` reserves rate-limit capacity for an allowed request. Call `record_success()` or `record_failure()` after the corresponding upstream response so adaptive and circuit-breaker state stays current.
 
-## Running Tests
-
-Run the test suite using standard `unittest` or `pytest`:
+## Development and testing
 
 ```bash
-pytest -v
+python -m pip install -e . pytest
+python -m pytest -q
+python -m compileall -q rate_limit_governor.py ratelimit_governor cli.py simulator.py
+node --check app.js
 ```
 
+GitHub Actions runs the test suite on Python 3.10, 3.12, and 3.14 and performs CLI and JavaScript syntax smoke tests.
+
+## Technology
+
+- Python standard library for the runtime package.
+- HTML, CSS, and vanilla JavaScript for the browser simulator.
+- GitHub Actions for continuous integration and GitHub Pages deployment.
+
+The browser interface is designed for current versions of Chrome, Edge, Firefox, and Safari. No browser Python runtime is required.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
